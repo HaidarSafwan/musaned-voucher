@@ -77,7 +77,9 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("job created", "job_id", j.ID, "input", inputPath)
-	go job.Process(h.store, j.ID, inputPath, h.cfg.ResultDir, h.db, h.cfg.ChunkSize, h.cfg.Parallelism)
+	h.store.Go(func() {
+		job.Process(h.store, j.ID, inputPath, h.cfg.ResultDir, h.db, h.cfg.ChunkSize, h.cfg.Parallelism)
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)

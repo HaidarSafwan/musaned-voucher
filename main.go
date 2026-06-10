@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"serial-enricher/config"
 	"serial-enricher/db"
 	"serial-enricher/handler"
 	"serial-enricher/job"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -136,9 +139,39 @@ func main() {
 		WriteTimeout: 5 * time.Minute,
 	}
 
-	slog.Info("server starting", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil {
-		slog.Error("server stopped", "error", err)
-		os.Exit(1)
+	// Run server in background so main goroutine can wait for OS signal
+	go func() {
+		slog.Info("server starting", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+	slog.Info("shutdown signal received", "signal", sig.String())
+
+	// Stop accepting new HTTP requests (30s timeout)
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer httpCancel()
+	if err := srv.Shutdown(httpCtx); err != nil {
+		slog.Error("HTTP server shutdown error", "error", err)
+	}
+	slog.Info("HTTP server stopped")
+
+	// Wait for all active jobs to finish (10 min timeout)
+	workerDone := make(chan struct{})
+	go func() {
+		store.Wait()
+		close(workerDone)
+	}()
+
+	select {
+	case <-workerDone:
+		slog.Info("all jobs completed, shutdown clean")
+	case <-time.After(10 * time.Minute):
+		slog.Warn("shutdown timeout reached, exiting with jobs still running")
 	}
 }

@@ -28,10 +28,25 @@ type Job struct {
 type Store struct {
 	mu   sync.RWMutex
 	jobs map[string]*Job
+	wg   sync.WaitGroup // tracks active worker goroutines
 }
 
 func NewStore() *Store {
 	return &Store{jobs: make(map[string]*Job)}
+}
+
+// Go launches fn in a tracked goroutine. Call Wait() to block until all finish.
+func (s *Store) Go(fn func()) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		fn()
+	}()
+}
+
+// Wait blocks until all goroutines launched via Go() have returned.
+func (s *Store) Wait() {
+	s.wg.Wait()
 }
 
 func (s *Store) Create() *Job {
