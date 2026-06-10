@@ -44,6 +44,11 @@ func writeError(w http.ResponseWriter, status int, msg string, logArgs ...any) {
 
 // POST /api/jobs
 func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
+	if h.store.IsProcessing() {
+		writeError(w, http.StatusConflict, "a job is already in progress, please wait for it to complete")
+		return
+	}
+
 	// Cap body at 20MB — handles base64 overhead of a 12MB CSV
 	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
 

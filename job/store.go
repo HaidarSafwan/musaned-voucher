@@ -35,6 +35,18 @@ func NewStore() *Store {
 	return &Store{jobs: make(map[string]*Job)}
 }
 
+// IsProcessing returns true if any job is currently pending or processing.
+func (s *Store) IsProcessing() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, j := range s.jobs {
+		if j.Status == StatusPending || j.Status == StatusProcessing {
+			return true
+		}
+	}
+	return false
+}
+
 // Go launches fn in a tracked goroutine. Call Wait() to block until all finish.
 func (s *Store) Go(fn func()) {
 	s.wg.Add(1)

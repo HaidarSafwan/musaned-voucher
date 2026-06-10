@@ -83,6 +83,14 @@ paths:
                 $ref: '#/components/schemas/Error'
               example:
                 error: "invalid API key"
+        '409':
+          description: A job is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "a job is already in progress, please wait for it to complete"
         '500':
           description: Server error — could not save uploaded file
           content:
