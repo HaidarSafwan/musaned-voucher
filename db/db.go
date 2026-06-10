@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -15,22 +16,28 @@ const serialsPlaceholder = "{{SERIALS}}"
 // DB holds configuration only — no live connection.
 // Call Connect() to open a connection for a single job.
 type DB struct {
-	dsn   string
-	query string
+	dsn          string
+	query        string
+	queryTimeout time.Duration
 }
 
-func New(dsn, query string) (*DB, error) {
+func New(dsn, query string, queryTimeoutSecs int) (*DB, error) {
 	if !strings.Contains(query, serialsPlaceholder) {
 		return nil, fmt.Errorf("query must contain %q placeholder for the IN clause", serialsPlaceholder)
 	}
-	return &DB{dsn: dsn, query: query}, nil
+	return &DB{
+		dsn:          dsn,
+		query:        query,
+		queryTimeout: time.Duration(queryTimeoutSecs) * time.Second,
+	}, nil
 }
 
 // Conn is a live Oracle connection tied to one job.
 // Always call Close() when done.
 type Conn struct {
-	conn  *sql.DB
-	query string
+	conn         *sql.DB
+	query        string
+	queryTimeout time.Duration
 }
 
 func (d *DB) Connect(maxConns int) (*Conn, error) {
@@ -38,15 +45,14 @@ func (d *DB) Connect(maxConns int) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open oracle connection: %w", err)
 	}
-	// Size the pool to match the number of parallel workers
 	conn.SetMaxOpenConns(maxConns)
 	conn.SetMaxIdleConns(maxConns)
 	if err := conn.Ping(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("oracle ping failed: %w", err)
 	}
-	slog.Info("DB connection pool opened", "max_conns", maxConns)
-	return &Conn{conn: conn, query: d.query}, nil
+	slog.Info("DB connection pool opened", "max_conns", maxConns, "query_timeout", d.queryTimeout)
+	return &Conn{conn: conn, query: d.query, queryTimeout: d.queryTimeout}, nil
 }
 
 func (c *Conn) Close() {
@@ -59,6 +65,7 @@ func (c *Conn) Close() {
 
 // GetSerialRows returns map[serial_no]csvRow for found serials.
 // Each row is pre-formatted as the columns defined in the configured query.
+// The query is cancelled automatically if it exceeds the configured timeout.
 func (c *Conn) GetSerialRows(serials []string) (map[string]string, error) {
 	if len(serials) == 0 {
 		return map[string]string{}, nil
@@ -73,9 +80,15 @@ func (c *Conn) GetSerialRows(serials []string) (map[string]string, error) {
 
 	query := strings.ReplaceAll(c.query, serialsPlaceholder, strings.Join(placeholders, ","))
 
+	ctx, cancel := context.WithTimeout(context.Background(), c.queryTimeout)
+	defer cancel()
+
 	start := time.Now()
-	rows, err := c.conn.Query(query, args...)
+	rows, err := c.conn.QueryContext(ctx, query, args...)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("oracle query timed out after %s (serials=%d)", c.queryTimeout, len(serials))
+		}
 		return nil, fmt.Errorf("oracle query failed (serials=%d): %w", len(serials), err)
 	}
 	defer rows.Close()
@@ -99,6 +112,7 @@ func (c *Conn) GetSerialRows(serials []string) (map[string]string, error) {
 		"found", len(result),
 		"not_found", len(serials)-len(result),
 		"duration_ms", time.Since(start).Milliseconds(),
+		"timeout_ms", c.queryTimeout.Milliseconds(),
 	)
 
 	return result, nil

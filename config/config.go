@@ -11,9 +11,10 @@ type Config struct {
 	ServerPort  string `json:"server_port"`
 	UploadDir   string `json:"upload_dir"`
 	ResultDir   string `json:"result_dir"`
-	ChunkSize   int    `json:"chunk_size"`
-	Parallelism int    `json:"parallelism"`
-	APIKey      string `json:"api_key"`
+	ChunkSize        int    `json:"chunk_size"`
+	Parallelism      int    `json:"parallelism"`
+	APIKey           string `json:"api_key"`
+	QueryTimeoutSecs int    `json:"query_timeout_secs"`
 }
 
 func Load(path string) (*Config, error) {
@@ -27,8 +28,9 @@ func Load(path string) (*Config, error) {
 		ServerPort:  "8080",
 		UploadDir:   "uploads",
 		ResultDir:   "results",
-		ChunkSize:   500,
-		Parallelism: 4,
+		ChunkSize:        500,
+		Parallelism:      4,
+		QueryTimeoutSecs: 120,
 	}
 	return cfg, json.NewDecoder(f).Decode(cfg)
 }
