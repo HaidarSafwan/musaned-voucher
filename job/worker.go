@@ -9,17 +9,15 @@ import (
 	"os"
 	"serial-enricher/db"
 	"strings"
-	"sync"
-	"sync/atomic"
 )
 
-func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, chunkSize, parallelism int) {
+func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, insertBatchSize int) {
 	log := slog.With("job_id", jobID)
-	log.Info("job started", "input", inputPath, "parallelism", parallelism)
+	log.Info("job started", "input", inputPath)
 
 	store.Update(jobID, func(j *Job) { j.Status = StatusProcessing })
 
-	conn, err := database.Connect(parallelism)
+	conn, err := database.Connect()
 	if err != nil {
 		log.Error("failed to connect to DB", "error", err)
 		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
@@ -27,85 +25,49 @@ func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, 
 	}
 	defer conn.Close()
 
-	// Single file pass: read all chunks and get total row count
-	chunks, total, err := readAllChunks(inputPath, chunkSize)
+	// 1. Read all serial numbers from CSV in one pass
+	serials, err := readAllSerials(inputPath)
 	if err != nil {
 		log.Error("failed to read input file", "error", err)
 		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
 		return
 	}
-	log.Info("file read complete", "total_rows", total, "chunks", len(chunks))
+	log.Info("serials loaded", "count", len(serials))
+	store.Update(jobID, func(j *Job) { j.Progress = 10 })
 
-	resultPath := fmt.Sprintf("%s/%s.csv", outputDir, jobID)
-	outFile, err := os.Create(resultPath)
-	if err != nil {
-		log.Error("failed to create result file", "path", resultPath, "error", err)
+	// 2. Bulk insert serials into staging table
+	if err := conn.BulkInsert(jobID, serials, insertBatchSize); err != nil {
+		log.Error("bulk insert failed", "error", err)
 		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
+		conn.Cleanup(jobID) // best-effort cleanup on failure
 		return
 	}
-	defer outFile.Close()
+	store.Update(jobID, func(j *Job) { j.Progress = 40 })
 
-	// Buffered writer — flushes in 1MB blocks instead of one syscall per row
-	writer := bufio.NewWriterSize(outFile, 1<<20)
-	defer writer.Flush()
-	writer.WriteString("serial_no,status,consumption_date,phone\n")
-
-	// results[i] holds the DB records for chunks[i], preserving input order
-	results := make([]map[string]string, len(chunks))
-
-	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		jobErr  error
-		processed atomic.Int64
-	)
-	sem := make(chan struct{}, parallelism) // limits concurrent DB queries
-
-	for i, chunk := range chunks {
-		wg.Add(1)
-		sem <- struct{}{} // acquire slot
-		go func(idx int, ch []string) {
-			defer wg.Done()
-			defer func() { <-sem }() // release slot
-
-			records, err := conn.GetSerialRows(ch)
-			if err != nil {
-				log.Error("DB query failed", "chunk_index", idx, "error", err)
-				mu.Lock()
-				if jobErr == nil {
-					jobErr = err
-				}
-				mu.Unlock()
-				return
-			}
-
-			results[idx] = records
-
-			n := processed.Add(int64(len(ch)))
-			store.Update(jobID, func(j *Job) {
-				j.Progress = int(float64(n) / float64(total) * 100)
-			})
-			log.Info("chunk complete", "chunk_index", idx, "rows", len(ch), "processed", n, "total", total)
-		}(i, chunk)
-	}
-
-	wg.Wait()
-
-	if jobErr != nil {
-		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = jobErr.Error() })
+	// 3. Single SELECT query joining vm_voucher with staging table
+	records, err := conn.GetAllRows(jobID)
+	if err != nil {
+		log.Error("query failed", "error", err)
+		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
+		conn.Cleanup(jobID)
 		return
 	}
+	store.Update(jobID, func(j *Job) { j.Progress = 80 })
 
-	// Write results in original CSV order
-	for i, chunk := range chunks {
-		for _, sn := range chunk {
-			sn = strings.TrimSpace(sn)
-			if row, found := results[i][sn]; found {
-				writer.WriteString(row + "\n")
-			} else {
-				writer.WriteString(sn + ",not_found,,\n")
-			}
-		}
+	// 4. Write enriched CSV in original input order
+	resultPath := fmt.Sprintf("%s/%s.csv", outputDir, jobID)
+	if err := writeResult(resultPath, serials, records); err != nil {
+		log.Error("failed to write result", "error", err)
+		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
+		conn.Cleanup(jobID)
+		return
+	}
+	store.Update(jobID, func(j *Job) { j.Progress = 95 })
+
+	// 5. Delete staging rows — always runs even if write succeeded
+	if err := conn.Cleanup(jobID); err != nil {
+		log.Warn("staging cleanup failed", "error", err)
+		// non-fatal: result is ready, just log the cleanup failure
 	}
 
 	store.Update(jobID, func(j *Job) {
@@ -113,52 +75,59 @@ func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, 
 		j.Progress = 100
 		j.ResultPath = resultPath
 	})
-	log.Info("job completed", "result", resultPath, "total_rows", total)
+	log.Info("job completed",
+		"result",      resultPath,
+		"total_rows",  len(serials),
+		"found_in_db", len(records),
+	)
 }
 
-// readAllChunks reads the entire CSV in one pass and returns chunks + total row count.
-// Replaces the separate countRows + streaming approach.
-func readAllChunks(path string, chunkSize int) ([][]string, int, error) {
+func readAllSerials(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("open %s: %w", path, err)
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
 	r := csv.NewReader(f)
 	if _, err := r.Read(); err != nil { // skip header
-		return nil, 0, fmt.Errorf("read header: %w", err)
+		return nil, fmt.Errorf("read header: %w", err)
 	}
 
-	var chunks [][]string
-	total := 0
+	var serials []string
 	for {
-		chunk, done := readChunk(r, chunkSize)
-		if len(chunk) > 0 {
-			chunks = append(chunks, chunk)
-			total += len(chunk)
-		}
-		if done {
-			break
-		}
-	}
-	return chunks, total, nil
-}
-
-func readChunk(r *csv.Reader, size int) ([]string, bool) {
-	var chunk []string
-	for i := 0; i < size; i++ {
 		row, err := r.Read()
 		if err == io.EOF {
-			return chunk, true
+			break
 		}
 		if err != nil {
 			slog.Warn("skipping malformed CSV row", "error", err)
 			continue
 		}
 		if len(row) > 0 && row[0] != "" {
-			chunk = append(chunk, row[0])
+			serials = append(serials, strings.TrimSpace(row[0]))
 		}
 	}
-	return chunk, false
+	return serials, nil
+}
+
+func writeResult(path string, serials []string, records map[string]string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer f.Close()
+
+	w := bufio.NewWriterSize(f, 1<<20)
+	defer w.Flush()
+
+	w.WriteString("serial_no,status,consumption_date,phone\n")
+	for _, sn := range serials {
+		if row, found := records[sn]; found {
+			w.WriteString(row + "\n")
+		} else {
+			w.WriteString(sn + ",not_found,,\n")
+		}
+	}
+	return nil
 }

@@ -104,12 +104,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	database, err := db.New(cfg.OracleDSN, cfg.Query, cfg.QueryTimeoutSecs)
+	database, err := db.New(cfg.OracleDSN, cfg.StagingDSN, cfg.StagingTable, cfg.Query, cfg.QueryTimeoutSecs)
 	if err != nil {
 		slog.Error("invalid DB config", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("DB config validated", "query_timeout_secs", cfg.QueryTimeoutSecs)
+	slog.Info("DB config validated",
+		"staging_table",     cfg.StagingTable,
+		"insert_batch_size", cfg.InsertBatchSize,
+		"query_timeout_secs", cfg.QueryTimeoutSecs,
+	)
 
 	if err := os.MkdirAll(cfg.UploadDir, 0755); err != nil {
 		slog.Error("failed to create upload dir", "dir", cfg.UploadDir, "error", err)
