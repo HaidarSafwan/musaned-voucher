@@ -98,7 +98,7 @@ func main() {
 		slog.Error("failed to load config", "path", cfgPath, "error", err)
 		os.Exit(1)
 	}
-	slog.Info("config loaded", "port", cfg.ServerPort, "chunk_size", cfg.ChunkSize)
+	slog.Info("config loaded", "port", cfg.ServerPort, "insert_batch_size", cfg.InsertBatchSize)
 	if cfg.APIKey == "" || cfg.APIKey == "change-me-before-deploy" {
 		slog.Error("api_key is not set — update config.json before running in production")
 		os.Exit(1)
