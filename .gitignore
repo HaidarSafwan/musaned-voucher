@@ -1,0 +1,13 @@
+config.json
+uploads/
+results/
+*.exe
+.DS_Store
+*.csv
+
+# built binaries (any name, no extension or platform suffixes)
+serial-enricher
+serial-enricher-*
+musaned-voucher*
+-linux-amd64
+-windows-amd64.exe
