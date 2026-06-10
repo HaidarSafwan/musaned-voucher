@@ -50,6 +50,7 @@
 
 <script>
 const GO_SERVICE_URL = 'http://localhost:8081';
+const API_KEY        = '8ddOUjRjlHHfH9R14vQlao7il8JTWiPp'; // must match api_key in config.json
 
 const dropZone   = document.getElementById('dropZone');
 const fileInput  = document.getElementById('fileInput');
@@ -125,7 +126,7 @@ function toBase64(file) {
 async function submitJob(base64) {
     const res = await fetch(`${GO_SERVICE_URL}/api/jobs`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
         body: JSON.stringify({ file: base64 }),
     });
     if (!res.ok) throw new Error(`Submit failed: ${await res.text()}`);
@@ -135,7 +136,9 @@ async function submitJob(base64) {
 
 async function pollUntilDone(jobId) {
     while (true) {
-        const res  = await fetch(`${GO_SERVICE_URL}/api/jobs/${jobId}`);
+        const res  = await fetch(`${GO_SERVICE_URL}/api/jobs/${jobId}`, {
+            headers: { 'X-API-Key': API_KEY },
+        });
         const job  = await res.json();
         const pct  = Math.max(10, job.Progress);
 
@@ -147,13 +150,20 @@ async function pollUntilDone(jobId) {
     }
 }
 
-function downloadResult(jobId) {
-    const a = document.createElement('a');
-    a.href     = `${GO_SERVICE_URL}/api/jobs/${jobId}/result`;
+async function downloadResult(jobId) {
+    const res = await fetch(`${GO_SERVICE_URL}/api/jobs/${jobId}/result`, {
+        headers: { 'X-API-Key': API_KEY },
+    });
+    if (!res.ok) throw new Error(`Download failed: ${await res.text()}`);
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
     a.download = 'result.csv';
     document.body.appendChild(a);
     a.click();
     a.remove();
+    URL.revokeObjectURL(url);
 }
 
 function setProgress(pct, text) {

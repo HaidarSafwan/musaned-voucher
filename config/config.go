@@ -13,6 +13,7 @@ type Config struct {
 	ResultDir   string `json:"result_dir"`
 	ChunkSize   int    `json:"chunk_size"`
 	Parallelism int    `json:"parallelism"`
+	APIKey      string `json:"api_key"`
 }
 
 func Load(path string) (*Config, error) {

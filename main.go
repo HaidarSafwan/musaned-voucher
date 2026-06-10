@@ -15,11 +15,39 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
+func apiKeyMiddleware(apiKey string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// CORS preflight carries no auth headers — let corsMiddleware handle it
+			if r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
+			key := r.Header.Get("X-API-Key")
+			if key == "" {
+				slog.Warn("missing API key", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(`{"error":"missing X-API-Key header"}`))
+				return
+			}
+			if key != apiKey {
+				slog.Warn("invalid API key", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"invalid API key"}`))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -68,6 +96,10 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("config loaded", "port", cfg.ServerPort, "chunk_size", cfg.ChunkSize)
+	if cfg.APIKey == "" || cfg.APIKey == "change-me-before-deploy" {
+		slog.Error("api_key is not set — update config.json before running in production")
+		os.Exit(1)
+	}
 
 	database, err := db.New(cfg.OracleDSN, cfg.Query)
 	if err != nil {
@@ -92,6 +124,7 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(recoveryMiddleware)
 	r.Use(corsMiddleware)
+	r.Use(apiKeyMiddleware(cfg.APIKey))
 	r.Post("/api/jobs", h.CreateJob)
 	r.Get("/api/jobs/{id}", h.GetJob)
 	r.Get("/api/jobs/{id}/result", h.DownloadResult)

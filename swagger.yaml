@@ -10,6 +10,9 @@ info:
     name: HaidarSafwan
     url: https://github.com/HaidarSafwan/musaned-voucher
 
+security:
+  - ApiKeyAuth: []
+
 servers:
   - url: http://localhost:8081
     description: Local development
@@ -64,6 +67,22 @@ paths:
                   summary: Invalid JSON body
                   value:
                     error: "invalid JSON body"
+        '401':
+          description: Missing X-API-Key header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "missing X-API-Key header"
+        '403':
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "invalid API key"
         '500':
           description: Server error — could not save uploaded file
           content:
@@ -118,6 +137,22 @@ paths:
                     Error: "oracle query failed (serials=999): ORA-00942: table or view does not exist"
                     ResultPath: ""
                     CreatedAt: "2025-01-10T08:30:00Z"
+        '401':
+          description: Missing X-API-Key header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "missing X-API-Key header"
+        '403':
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "invalid API key"
         '404':
           description: Job ID not found
           content:
@@ -155,6 +190,22 @@ paths:
                 1234567,ACTIVE,10/01/2025 12:00:00,501234567
                 8901234,CONSUMED,05/12/2024 09:15:30,
                 1111111,not_found,,
+        '401':
+          description: Missing X-API-Key header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "missing X-API-Key header"
+        '403':
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "invalid API key"
         '404':
           description: Job ID not found
           content:
@@ -181,6 +232,13 @@ paths:
                 error: "job failed"
 
 components:
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key — must match the `api_key` value in server config.json
 
   parameters:
     JobId:
