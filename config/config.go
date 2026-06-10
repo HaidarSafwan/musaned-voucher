@@ -6,8 +6,7 @@ import (
 )
 
 type Config struct {
-	OracleDSN       string `json:"oracle_dsn"`        // DB that runs the SELECT query
-	StagingDSN      string `json:"staging_dsn"`       // DB that holds the staging table
+	StagingDSN      string `json:"staging_dsn"`       // Oracle DB for INSERT, SELECT, and DELETE
 	StagingTable    string `json:"staging_table"`     // staging table name
 	Query           string `json:"query"`             // SELECT query; filters by job_id via :1
 	ServerPort      string `json:"server_port"`

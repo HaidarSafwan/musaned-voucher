@@ -11,17 +11,17 @@ import (
 	_ "github.com/sijms/go-ora/v2"
 )
 
-// DB holds configuration only — no live connections.
-// Call Connect() to open connections for a single job.
+// DB holds configuration only — no live connection.
+// All operations (INSERT, SELECT, DELETE) run on the staging DB.
+// Call Connect() to open a connection for a single job.
 type DB struct {
-	oracleDSN    string
 	stagingDSN   string
 	stagingTable string
 	query        string
 	queryTimeout time.Duration
 }
 
-func New(oracleDSN, stagingDSN, stagingTable, query string, queryTimeoutSecs int) (*DB, error) {
+func New(stagingDSN, stagingTable, query string, queryTimeoutSecs int) (*DB, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, fmt.Errorf("query must not be empty")
 	}
@@ -29,7 +29,6 @@ func New(oracleDSN, stagingDSN, stagingTable, query string, queryTimeoutSecs int
 		return nil, fmt.Errorf("staging_table must not be empty")
 	}
 	return &DB{
-		oracleDSN:    oracleDSN,
 		stagingDSN:   stagingDSN,
 		stagingTable: stagingTable,
 		query:        query,
@@ -37,72 +36,48 @@ func New(oracleDSN, stagingDSN, stagingTable, query string, queryTimeoutSecs int
 	}, nil
 }
 
-// Conn holds two live Oracle connections for one job:
-//   - stagingConn: INSERT / DELETE on the staging table
-//   - queryConn:   single SELECT that joins vm_voucher with the staging table
-//
+// Conn is a live connection to the staging DB for one job.
+// It handles INSERT, SELECT, and DELETE — all on the same connection.
 // Always call Close() when done.
 type Conn struct {
-	stagingConn  *sql.DB
-	queryConn    *sql.DB
+	conn         *sql.DB
 	stagingTable string
 	query        string
 	queryTimeout time.Duration
 }
 
 func (d *DB) Connect() (*Conn, error) {
-	stagingConn, err := openAndPing(d.stagingDSN)
+	conn, err := sql.Open("oracle", d.stagingDSN)
 	if err != nil {
-		return nil, fmt.Errorf("staging DB: %w", err)
+		return nil, fmt.Errorf("open staging connection: %w", err)
 	}
-
-	queryConn, err := openAndPing(d.oracleDSN)
-	if err != nil {
-		stagingConn.Close()
-		return nil, fmt.Errorf("query DB: %w", err)
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := conn.Ping(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("staging DB ping failed: %w", err)
 	}
-
-	slog.Info("DB connections opened",
-		"staging", d.stagingDSN,
-		"query",   d.oracleDSN,
-	)
+	slog.Info("staging DB connection opened", "dsn", d.stagingDSN)
 	return &Conn{
-		stagingConn:  stagingConn,
-		queryConn:    queryConn,
+		conn:         conn,
 		stagingTable: d.stagingTable,
 		query:        d.query,
 		queryTimeout: d.queryTimeout,
 	}, nil
 }
 
-func openAndPing(dsn string) (*sql.DB, error) {
-	conn, err := sql.Open("oracle", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open connection: %w", err)
-	}
-	conn.SetMaxOpenConns(1)
-	conn.SetMaxIdleConns(1)
-	if err := conn.Ping(); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("ping failed: %w", err)
-	}
-	return conn, nil
-}
-
 func (c *Conn) Close() {
-	if err := c.stagingConn.Close(); err != nil {
+	if err := c.conn.Close(); err != nil {
 		slog.Error("failed to close staging DB connection", "error", err)
+		return
 	}
-	if err := c.queryConn.Close(); err != nil {
-		slog.Error("failed to close query DB connection", "error", err)
-	}
-	slog.Info("DB connections closed")
+	slog.Info("staging DB connection closed")
 }
 
-// BulkInsert inserts all serial numbers into the staging table in batches.
+// BulkInsert loads all serial numbers into the staging table in batches.
 // Uses Oracle array binding — each batch is a single network round trip.
 func (c *Conn) BulkInsert(jobID string, serials []string, batchSize int) error {
-	tx, err := c.stagingConn.Begin()
+	tx, err := c.conn.Begin()
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -124,7 +99,6 @@ func (c *Conn) BulkInsert(jobID string, serials []string, batchSize int) error {
 		}
 		batch := serials[start:end]
 
-		// Build parallel slices for array binding
 		jobIDs := make([]string, len(batch))
 		for i := range jobIDs {
 			jobIDs[i] = jobID
@@ -144,19 +118,20 @@ func (c *Conn) BulkInsert(jobID string, serials []string, batchSize int) error {
 	return nil
 }
 
-// GetAllRows runs the single configured SELECT query filtered by job_id.
-// Returns map[serial_no]csvRow — each row pre-formatted by the query itself.
+// GetAllRows runs the configured SELECT query on the staging DB,
+// filtered by job_id. The query accesses vm_voucher via a DB link.
+// Returns map[serial_no]csvRow — each row pre-formatted by the query.
 func (c *Conn) GetAllRows(jobID string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.queryTimeout)
 	defer cancel()
 
 	start := time.Now()
-	rows, err := c.queryConn.QueryContext(ctx, c.query, jobID)
+	rows, err := c.conn.QueryContext(ctx, c.query, jobID)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("query timed out after %s", c.queryTimeout)
 		}
-		return nil, fmt.Errorf("oracle query failed: %w", err)
+		return nil, fmt.Errorf("query failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -187,7 +162,7 @@ func (c *Conn) Cleanup(jobID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	res, err := c.stagingConn.ExecContext(ctx,
+	res, err := c.conn.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM %s WHERE job_id = :1", c.stagingTable),
 		jobID,
 	)

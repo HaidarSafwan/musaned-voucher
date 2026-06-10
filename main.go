@@ -104,7 +104,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	database, err := db.New(cfg.OracleDSN, cfg.StagingDSN, cfg.StagingTable, cfg.Query, cfg.QueryTimeoutSecs)
+	database, err := db.New(cfg.StagingDSN, cfg.StagingTable, cfg.Query, cfg.QueryTimeoutSecs)
 	if err != nil {
 		slog.Error("invalid DB config", "error", err)
 		os.Exit(1)
