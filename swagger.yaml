@@ -1,0 +1,255 @@
+openapi: 3.0.3
+info:
+  title: Serial Number Enricher API
+  description: >
+    Accepts a base64-encoded CSV of serial numbers, queries Oracle DB in
+    parallel chunks, and returns an enriched CSV with status, consumption
+    date, and phone fields.
+  version: 1.0.0
+  contact:
+    name: HaidarSafwan
+    url: https://github.com/HaidarSafwan/musaned-voucher
+
+servers:
+  - url: http://localhost:8081
+    description: Local development
+
+tags:
+  - name: Jobs
+    description: Async enrichment job lifecycle
+
+paths:
+
+  /api/jobs:
+    post:
+      tags: [Jobs]
+      summary: Submit a new enrichment job
+      description: >
+        Accepts a base64-encoded CSV file containing serial numbers.
+        The CSV must have a header row with at least a `serial_no` column as the first field.
+        Returns a `job_id` immediately; processing runs asynchronously.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobRequest'
+            example:
+              file: "c2VyaWFsX25vCjEyMzQ1NjcKODkwMTIzCg=="
+      responses:
+        '202':
+          description: Job accepted and queued for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAccepted'
+              example:
+                job_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        '400':
+          description: Invalid request — bad JSON, missing file field, or invalid base64
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missing_field:
+                  summary: Missing file field
+                  value:
+                    error: "missing file field"
+                invalid_base64:
+                  summary: Invalid base64 content
+                  value:
+                    error: "invalid base64 content"
+                invalid_json:
+                  summary: Invalid JSON body
+                  value:
+                    error: "invalid JSON body"
+        '500':
+          description: Server error — could not save uploaded file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "failed to create upload file"
+
+  /api/jobs/{id}:
+    get:
+      tags: [Jobs]
+      summary: Get job status and progress
+      description: >
+        Poll this endpoint every 2 seconds after submitting a job.
+        When `Status` is `done`, call the result endpoint to download the CSV.
+        When `Status` is `failed`, the `Error` field contains the reason.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job found — check Status field for current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                processing:
+                  summary: Job in progress
+                  value:
+                    ID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    Status: "processing"
+                    Progress: 45
+                    Error: ""
+                    ResultPath: ""
+                    CreatedAt: "2025-01-10T08:30:00Z"
+                done:
+                  summary: Job complete
+                  value:
+                    ID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    Status: "done"
+                    Progress: 100
+                    Error: ""
+                    ResultPath: "results/a1b2c3d4-e5f6-7890-abcd-ef1234567890.csv"
+                    CreatedAt: "2025-01-10T08:30:00Z"
+                failed:
+                  summary: Job failed
+                  value:
+                    ID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    Status: "failed"
+                    Progress: 20
+                    Error: "oracle query failed (serials=999): ORA-00942: table or view does not exist"
+                    ResultPath: ""
+                    CreatedAt: "2025-01-10T08:30:00Z"
+        '404':
+          description: Job ID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "job not found"
+
+  /api/jobs/{id}/result:
+    get:
+      tags: [Jobs]
+      summary: Download enriched CSV result
+      description: >
+        Returns the enriched CSV file as a download attachment.
+        Only available when job `Status` is `done`.
+        The uploaded input file and this result file are both deleted from
+        the server immediately after this response is sent.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Enriched CSV file
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="result.csv"
+          content:
+            text/csv:
+              schema:
+                type: string
+              example: |
+                serial_no,status,consumption_date,phone
+                1234567,ACTIVE,10/01/2025 12:00:00,501234567
+                8901234,CONSUMED,05/12/2024 09:15:30,
+                1111111,not_found,,
+        '404':
+          description: Job ID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "job not found"
+        '409':
+          description: Job is still processing — not ready for download
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "job not ready"
+        '422':
+          description: Job failed — no result available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "job failed"
+
+components:
+
+  parameters:
+    JobId:
+      name: id
+      in: path
+      required: true
+      description: UUID of the job returned by POST /api/jobs
+      schema:
+        type: string
+        format: uuid
+        example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+  schemas:
+
+    JobRequest:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: byte
+          description: >
+            Base64-encoded CSV file content. The CSV must have a header row;
+            the first column must be `serial_no`. Maximum decoded size is ~15MB.
+          example: "c2VyaWFsX25vCjEyMzQ1NjcKODkwMTIzCg=="
+
+    JobAccepted:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: Unique identifier for the created job — use to poll status and download result
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    Job:
+      type: object
+      properties:
+        ID:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        Status:
+          type: string
+          enum: [pending, processing, done, failed]
+          example: "processing"
+        Progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Percentage of rows processed (0–100)
+          example: 45
+        Error:
+          type: string
+          description: Error message if Status is failed, empty otherwise
+          example: ""
+        ResultPath:
+          type: string
+          description: Internal server path — not useful to clients, use the result endpoint
+          example: ""
+        CreatedAt:
+          type: string
+          format: date-time
+          example: "2025-01-10T08:30:00Z"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+          example: "job not found"
