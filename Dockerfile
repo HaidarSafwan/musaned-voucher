@@ -18,8 +18,10 @@ WORKDIR /app
 
 COPY --from=builder /build/musaned-voucher .
 
-# Directories the service writes to; override with volume mounts in production
+# Directories the service writes to; mount as volumes in production so
+# uploads, results, and jobs.json survive container restarts
 RUN mkdir -p uploads results
+VOLUME ["/app/uploads", "/app/results", "/app/jobs.json"]
 
 EXPOSE 8081
 
