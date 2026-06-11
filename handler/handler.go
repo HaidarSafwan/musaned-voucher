@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -14,7 +15,27 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
+
+type contextKey string
+
+const reqIDKey contextKey = "request_id"
+
+// RequestIDMiddleware generates a UUID for each request, sets it as the
+// X-Request-ID response header, and stores it in the request context.
+func RequestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := uuid.NewString()
+		w.Header().Set("X-Request-ID", id)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), reqIDKey, id)))
+	})
+}
+
+func requestIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(reqIDKey).(string)
+	return id
+}
 
 type Handler struct {
 	store *job.Store
@@ -42,8 +63,38 @@ func writeError(w http.ResponseWriter, status int, msg string, logArgs ...any) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// GET /health
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// GET /ready
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+	if err := h.db.Ping(); err != nil {
+		slog.Warn("readiness check failed", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// GET /api/jobs
+func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := h.store.List()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(jobs); err != nil {
+		slog.Error("failed to encode jobs list", "error", err)
+	}
+}
+
 // POST /api/jobs
 func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFrom(r.Context())
+
 	if h.store.IsProcessing() {
 		writeError(w, http.StatusConflict, "a job is already in progress, please wait for it to complete")
 		return
@@ -81,9 +132,9 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("job created", "job_id", j.ID, "input", inputPath)
+	slog.Info("job created", "job_id", j.ID, "request_id", reqID, "input", inputPath)
 	h.store.Go(func() {
-		job.Process(h.store, j.ID, inputPath, h.cfg.ResultDir, h.db, h.cfg.InsertBatchSize)
+		job.Process(h.store, j.ID, inputPath, h.cfg.ResultDir, reqID, h.db, h.cfg.InsertBatchSize)
 	})
 
 	w.Header().Set("Content-Type", "application/json")

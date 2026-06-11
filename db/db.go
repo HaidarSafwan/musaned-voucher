@@ -46,6 +46,19 @@ type Conn struct {
 	queryTimeout time.Duration
 }
 
+// Ping opens a short-lived connection to verify the staging DB is reachable.
+// Used by the /ready health check endpoint.
+func (d *DB) Ping() error {
+	conn, err := sql.Open("oracle", d.stagingDSN)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return conn.PingContext(ctx)
+}
+
 func (d *DB) Connect() (*Conn, error) {
 	conn, err := sql.Open("oracle", d.stagingDSN)
 	if err != nil {
@@ -121,55 +134,77 @@ func (c *Conn) BulkInsert(jobID string, serials []string, batchSize int) error {
 // GetAllRows runs the configured SELECT query on the staging DB,
 // filtered by job_id. The query accesses vm_voucher via a DB link.
 // Returns map[serial_no]csvRow — each row pre-formatted by the query.
+//
+// Uses a manual timer + cancel rather than context.WithTimeout so that
+// the deadline does not fire mid-scan between Oracle row-batch fetches.
 func (c *Conn) GetAllRows(jobID string) (map[string]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.queryTimeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	type scanResult struct {
+		data map[string]string
+		err  error
+	}
+	ch := make(chan scanResult, 1)
 	start := time.Now()
-	rows, err := c.conn.QueryContext(ctx, c.query, jobID)
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("query timed out after %s", c.queryTimeout)
-		}
-		return nil, fmt.Errorf("query failed: %w", err)
-	}
-	defer rows.Close()
 
-	result := make(map[string]string)
-	for rows.Next() {
-		var row string
-		if err := rows.Scan(&row); err != nil {
-			return nil, fmt.Errorf("scan row: %w", err)
+	go func() {
+		rows, err := c.conn.QueryContext(ctx, c.query, jobID)
+		if err != nil {
+			ch <- scanResult{err: fmt.Errorf("query failed: %w", err)}
+			return
 		}
-		if idx := strings.Index(row, ","); idx > 0 {
-			result[row[:idx]] = row
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows iteration: %w", err)
-	}
+		defer rows.Close()
 
-	slog.Info("query complete",
-		"job_id",      jobID,
-		"found",       len(result),
-		"duration_ms", time.Since(start).Milliseconds(),
-	)
-	return result, nil
+		data := make(map[string]string)
+		for rows.Next() {
+			var row string
+			if err := rows.Scan(&row); err != nil {
+				ch <- scanResult{err: fmt.Errorf("scan row: %w", err)}
+				return
+			}
+			if idx := strings.Index(row, ","); idx > 0 {
+				data[row[:idx]] = row
+			}
+		}
+		if err := rows.Err(); err != nil {
+			ch <- scanResult{err: fmt.Errorf("rows iteration: %w", err)}
+			return
+		}
+		ch <- scanResult{data: data}
+	}()
+
+	timer := time.NewTimer(c.queryTimeout)
+	defer timer.Stop()
+
+	select {
+	case r := <-ch:
+		if r.err == nil {
+			slog.Info("query complete",
+				"job_id",      jobID,
+				"found",       len(r.data),
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
+		}
+		return r.data, r.err
+	case <-timer.C:
+		cancel() // signal Oracle to stop sending rows
+		return nil, fmt.Errorf("query timed out after %s", c.queryTimeout)
+	}
 }
 
-// Cleanup deletes all staging rows for the given job_id.
+// Cleanup truncates the staging table. Safe because the service enforces
+// single-job-at-a-time, so no other job's rows are ever present concurrently.
+// TRUNCATE is orders of magnitude faster than DELETE for large row counts
+// because it deallocates blocks rather than generating per-row undo.
 func (c *Conn) Cleanup(jobID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	res, err := c.conn.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE job_id = :1", c.stagingTable),
-		jobID,
-	)
+	_, err := c.conn.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s", c.stagingTable))
 	if err != nil {
-		return fmt.Errorf("staging cleanup failed: %w", err)
+		return fmt.Errorf("staging truncate failed: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	slog.Info("staging cleanup complete", "job_id", jobID, "rows_deleted", n)
+	slog.Info("staging truncate complete", "job_id", jobID)
 	return nil
 }

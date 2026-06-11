@@ -11,9 +11,29 @@ import (
 	"strings"
 )
 
-func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, insertBatchSize int) {
-	log := slog.With("job_id", jobID)
+func Process(store *Store, jobID, inputPath, outputDir, requestID string, database *db.DB, insertBatchSize int) {
+	log := slog.With("job_id", jobID, "request_id", requestID)
 	log.Info("job started", "input", inputPath)
+
+	// Safety net: if Process exits for any reason (panic or missed return path)
+	// without having set a terminal status, force the job to failed so
+	// IsProcessing() never returns true indefinitely.
+	defer func() {
+		rec := recover()
+		if rec != nil {
+			log.Error("job panicked", "panic", rec)
+		}
+		store.Update(jobID, func(j *Job) {
+			if j.Status == StatusPending || j.Status == StatusProcessing {
+				j.Status = StatusFailed
+				if rec != nil {
+					j.Error = fmt.Sprintf("panic: %v", rec)
+				} else {
+					j.Error = "job exited unexpectedly"
+				}
+			}
+		})
+	}()
 
 	store.Update(jobID, func(j *Job) { j.Status = StatusProcessing })
 
@@ -23,12 +43,14 @@ func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, 
 		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
 		return
 	}
-	defer conn.Close()
+	// conn is NOT deferred here — ownership transfers to the cleanup goroutine
+	// at the end of the happy path. Error paths close it explicitly below.
 
 	// 1. Read all serial numbers from CSV in one pass
 	serials, err := readAllSerials(inputPath)
 	if err != nil {
 		log.Error("failed to read input file", "error", err)
+		conn.Close()
 		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
 		return
 	}
@@ -38,8 +60,9 @@ func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, 
 	// 2. Bulk insert serials into staging table
 	if err := conn.BulkInsert(jobID, serials, insertBatchSize); err != nil {
 		log.Error("bulk insert failed", "error", err)
+		conn.Cleanup(jobID)
+		conn.Close()
 		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
-		conn.Cleanup(jobID) // best-effort cleanup on failure
 		return
 	}
 	store.Update(jobID, func(j *Job) { j.Progress = 40 })
@@ -48,8 +71,9 @@ func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, 
 	records, err := conn.GetAllRows(jobID)
 	if err != nil {
 		log.Error("query failed", "error", err)
-		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
 		conn.Cleanup(jobID)
+		conn.Close()
+		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
 		return
 	}
 	store.Update(jobID, func(j *Job) { j.Progress = 80 })
@@ -58,18 +82,13 @@ func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, 
 	resultPath := fmt.Sprintf("%s/%s.csv", outputDir, jobID)
 	if err := writeResult(resultPath, serials, records); err != nil {
 		log.Error("failed to write result", "error", err)
-		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
 		conn.Cleanup(jobID)
+		conn.Close()
+		store.Update(jobID, func(j *Job) { j.Status = StatusFailed; j.Error = err.Error() })
 		return
 	}
-	store.Update(jobID, func(j *Job) { j.Progress = 95 })
 
-	// 5. Delete staging rows — always runs even if write succeeded
-	if err := conn.Cleanup(jobID); err != nil {
-		log.Warn("staging cleanup failed", "error", err)
-		// non-fatal: result is ready, just log the cleanup failure
-	}
-
+	// Mark done — client can download immediately without waiting for staging cleanup
 	store.Update(jobID, func(j *Job) {
 		j.Status = StatusDone
 		j.Progress = 100
@@ -80,6 +99,14 @@ func Process(store *Store, jobID, inputPath, outputDir string, database *db.DB, 
 		"total_rows",  len(serials),
 		"found_in_db", len(records),
 	)
+
+	// 5. Delete staging rows in background — does not block the client download
+	store.Go(func() {
+		defer conn.Close()
+		if err := conn.Cleanup(jobID); err != nil {
+			log.Warn("staging cleanup failed", "error", err)
+		}
+	})
 }
 
 func readAllSerials(path string) ([]string, error) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"serial-enricher/config"
 	"serial-enricher/db"
 	"serial-enricher/handler"
@@ -72,14 +73,43 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// defaultConfigPath returns config.json in the same directory as the binary.
-// Falls back to the current working directory if the executable path cannot be resolved.
-func defaultConfigPath() string {
-	exe, err := os.Executable()
+// cleanupOrphanedFiles removes all .csv files in dir that were left behind by
+// jobs that never completed (e.g. after a crash). Safe to call on every startup
+// because the in-memory job store is always empty at that point.
+func cleanupOrphanedFiles(dir string) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "config.json"
+		slog.Warn("orphan cleanup: failed to read dir", "dir", dir, "error", err)
+		return
 	}
-	return filepath.Join(filepath.Dir(exe), "config.json")
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".csv") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if err := os.Remove(path); err != nil {
+			slog.Warn("orphan cleanup: failed to remove file", "path", path, "error", err)
+		} else {
+			removed++
+		}
+	}
+	if removed > 0 {
+		slog.Info("orphan cleanup complete", "dir", dir, "removed", removed)
+	}
+}
+
+// defaultConfigPath returns the path to config.json.
+// Prefers the directory next to the binary (production deployment).
+// Falls back to the working directory so `go run` picks up the project config.
+func defaultConfigPath() string {
+	if exe, err := os.Executable(); err == nil {
+		p := filepath.Join(filepath.Dir(exe), "config.json")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "config.json"
 }
 
 func main() {
@@ -98,7 +128,13 @@ func main() {
 		slog.Error("failed to load config", "path", cfgPath, "error", err)
 		os.Exit(1)
 	}
-	slog.Info("config loaded", "port", cfg.ServerPort, "insert_batch_size", cfg.InsertBatchSize)
+	slog.Info("config loaded",
+		"path",               cfgPath,
+		"port",               cfg.ServerPort,
+		"insert_batch_size",  cfg.InsertBatchSize,
+		"query_timeout_secs", cfg.QueryTimeoutSecs,
+		"job_ttl_secs",       cfg.JobTTLSecs,
+	)
 	if cfg.APIKey == "" || cfg.APIKey == "change-me-before-deploy" {
 		slog.Error("api_key is not set — update config.json before running in production")
 		os.Exit(1)
@@ -123,18 +159,35 @@ func main() {
 		slog.Error("failed to create result dir", "dir", cfg.ResultDir, "error", err)
 		os.Exit(1)
 	}
+	cleanupOrphanedFiles(cfg.UploadDir)
+	cleanupOrphanedFiles(cfg.ResultDir)
 
-	store := job.NewStore()
+	store := job.NewStore(time.Duration(cfg.JobTTLSecs) * time.Second)
 	h := handler.New(store, database, cfg)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(recoveryMiddleware)
 	r.Use(corsMiddleware)
-	r.Use(apiKeyMiddleware(cfg.APIKey))
-	r.Post("/api/jobs", h.CreateJob)
-	r.Get("/api/jobs/{id}", h.GetJob)
-	r.Get("/api/jobs/{id}/result", h.DownloadResult)
+	r.Use(handler.RequestIDMiddleware)
+	if cfg.RateLimitRPS > 0 {
+		rl := handler.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst)
+		r.Use(rl.Middleware)
+		slog.Info("rate limiting enabled", "rps", cfg.RateLimitRPS, "burst", cfg.RateLimitBurst)
+	}
+
+	// Health endpoints — no auth required (used by load balancers and probes)
+	r.Get("/health", h.Health)
+	r.Get("/ready", h.Ready)
+
+	// Protected API endpoints
+	r.Group(func(r chi.Router) {
+		r.Use(apiKeyMiddleware(cfg.APIKey))
+		r.Get("/api/jobs", h.ListJobs)
+		r.Post("/api/jobs", h.CreateJob)
+		r.Get("/api/jobs/{id}", h.GetJob)
+		r.Get("/api/jobs/{id}/result", h.DownloadResult)
+	})
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.ServerPort,
@@ -178,4 +231,6 @@ func main() {
 	case <-time.After(10 * time.Minute):
 		slog.Warn("shutdown timeout reached, exiting with jobs still running")
 	}
+
+	store.Close()
 }

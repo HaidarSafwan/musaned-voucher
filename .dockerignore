@@ -1,0 +1,8 @@
+.git/
+.vscode/
+uploads/
+results/
+config.json
+musaned-voucher
+musaned-voucher.exe
+*.csv
