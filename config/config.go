@@ -16,6 +16,7 @@ type Config struct {
 	APIKey           string `json:"api_key"`
 	QueryTimeoutSecs int    `json:"query_timeout_secs"`
 	JobTTLSecs       int    `json:"job_ttl_secs"`        // seconds before done/failed jobs are evicted from memory
+	StorePath        string `json:"store_path"`          // path to flat JSON job persistence file; empty = disabled
 	RateLimitRPS     int    `json:"rate_limit_rps"`      // max requests per second per IP (0 = disabled)
 	RateLimitBurst   int    `json:"rate_limit_burst"`    // burst allowance above RPS
 }
@@ -35,6 +36,7 @@ func Load(path string) (*Config, error) {
 		InsertBatchSize:  10000,
 		QueryTimeoutSecs: 120,
 		JobTTLSecs:       10000,
+		StorePath:        "jobs.json",
 		RateLimitRPS:     10,
 		RateLimitBurst:   20,
 	}

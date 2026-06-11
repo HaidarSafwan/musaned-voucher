@@ -4,6 +4,7 @@ results/
 *.exe
 .DS_Store
 *.csv
+jobs.json
 
 # built binaries (any name, no extension or platform suffixes)
 serial-enricher

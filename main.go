@@ -134,6 +134,7 @@ func main() {
 		"insert_batch_size",  cfg.InsertBatchSize,
 		"query_timeout_secs", cfg.QueryTimeoutSecs,
 		"job_ttl_secs",       cfg.JobTTLSecs,
+		"store_path",         cfg.StorePath,
 	)
 	if cfg.APIKey == "" || cfg.APIKey == "change-me-before-deploy" {
 		slog.Error("api_key is not set — update config.json before running in production")
@@ -162,7 +163,7 @@ func main() {
 	cleanupOrphanedFiles(cfg.UploadDir)
 	cleanupOrphanedFiles(cfg.ResultDir)
 
-	store := job.NewStore(time.Duration(cfg.JobTTLSecs) * time.Second)
+	store := job.NewStore(time.Duration(cfg.JobTTLSecs)*time.Second, cfg.StorePath)
 	h := handler.New(store, database, cfg)
 
 	r := chi.NewRouter()

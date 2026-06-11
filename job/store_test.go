@@ -6,7 +6,7 @@ import (
 )
 
 func TestStore_CreateAndGet(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -33,7 +33,7 @@ func TestStore_CreateAndGet(t *testing.T) {
 }
 
 func TestStore_GetMissing(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	_, ok := s.Get("does-not-exist")
@@ -43,7 +43,7 @@ func TestStore_GetMissing(t *testing.T) {
 }
 
 func TestStore_Update(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -69,7 +69,7 @@ func TestStore_Update(t *testing.T) {
 }
 
 func TestStore_Update_NoopOnMissing(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	// Should not panic on unknown ID
@@ -77,7 +77,7 @@ func TestStore_Update_NoopOnMissing(t *testing.T) {
 }
 
 func TestStore_IsProcessing_EmptyStore(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	if s.IsProcessing() {
@@ -86,7 +86,7 @@ func TestStore_IsProcessing_EmptyStore(t *testing.T) {
 }
 
 func TestStore_IsProcessing_Pending(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	s.Create() // StatusPending
@@ -96,7 +96,7 @@ func TestStore_IsProcessing_Pending(t *testing.T) {
 }
 
 func TestStore_IsProcessing_Processing(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -107,7 +107,7 @@ func TestStore_IsProcessing_Processing(t *testing.T) {
 }
 
 func TestStore_IsProcessing_FalseWhenDone(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -118,7 +118,7 @@ func TestStore_IsProcessing_FalseWhenDone(t *testing.T) {
 }
 
 func TestStore_IsProcessing_FalseWhenFailed(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -129,7 +129,7 @@ func TestStore_IsProcessing_FalseWhenFailed(t *testing.T) {
 }
 
 func TestStore_EvictExpired_RemovesDoneJob(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -148,7 +148,7 @@ func TestStore_EvictExpired_RemovesDoneJob(t *testing.T) {
 }
 
 func TestStore_EvictExpired_RemovesFailedJob(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -166,7 +166,7 @@ func TestStore_EvictExpired_RemovesFailedJob(t *testing.T) {
 }
 
 func TestStore_EvictExpired_SkipsActiveJobs(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create() // StatusPending
@@ -184,7 +184,7 @@ func TestStore_EvictExpired_SkipsActiveJobs(t *testing.T) {
 }
 
 func TestStore_EvictExpired_SkipsRecentDoneJob(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
@@ -199,7 +199,7 @@ func TestStore_EvictExpired_SkipsRecentDoneJob(t *testing.T) {
 }
 
 func TestStore_EvictExpired_DisabledWithZeroTTL(t *testing.T) {
-	s := NewStore(0) // TTL disabled
+	s := NewStore(0, "") // TTL disabled
 	defer s.Close()
 
 	j := s.Create()
@@ -217,7 +217,7 @@ func TestStore_EvictExpired_DisabledWithZeroTTL(t *testing.T) {
 }
 
 func TestStore_List_Empty(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	if jobs := s.List(); len(jobs) != 0 {
@@ -226,7 +226,7 @@ func TestStore_List_Empty(t *testing.T) {
 }
 
 func TestStore_List_Count(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	s.Create()
@@ -239,7 +239,7 @@ func TestStore_List_Count(t *testing.T) {
 }
 
 func TestStore_List_ReturnsCopies(t *testing.T) {
-	s := NewStore(time.Hour)
+	s := NewStore(time.Hour, "")
 	defer s.Close()
 
 	j := s.Create()
