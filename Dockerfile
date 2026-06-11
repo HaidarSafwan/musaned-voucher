@@ -18,12 +18,18 @@ WORKDIR /app
 
 COPY --from=builder /build/musaned-voucher .
 
-# Directories the service writes to; mount as volumes in production so
-# uploads, results, and jobs.json survive container restarts
-RUN mkdir -p uploads results
-VOLUME ["/app/uploads", "/app/results", "/app/jobs.json"]
+# OpenShift runs containers with a random UID assigned to group 0 (root).
+# chown 1001:0 + chmod g=u ensures the random UID can read/write all files.
+RUN mkdir -p data/uploads data/results && \
+    chown -R 1001:0 /app && \
+    chmod -R g=u /app
+
+# Mount /app/data as a volume to persist uploads, results, and jobs.json
+VOLUME ["/app/data"]
 
 EXPOSE 8081
 
-# Pass config path as first arg, or mount config.json at /app/config.json
+USER 1001
+
+# Mount config.json at /app/config.json or pass path as first argument
 ENTRYPOINT ["./musaned-voucher"]

@@ -1,0 +1,106 @@
+# ── PersistentVolumeClaim ────────────────────────────────────────────────────
+# Stores uploads/, results/, and jobs.json across pod restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: musaned-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# ── Deployment ───────────────────────────────────────────────────────────────
+# Single replica — the in-memory job queue does not support multi-instance.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: musaned-voucher
+  labels:
+    app: musaned-voucher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: musaned-voucher
+  template:
+    metadata:
+      labels:
+        app: musaned-voucher
+    spec:
+      containers:
+        - name: musaned-voucher
+          # Replace <project> with your OpenShift project name
+          image: image-registry.openshift-image-registry.svc:5000/<project>/musaned-voucher:latest
+          ports:
+            - containerPort: 8081
+          # config.json is mounted from the musaned-config Secret
+          # No args needed — binary finds /app/config.json automatically
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.json
+              subPath: config.json
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: config
+          secret:
+            secretName: musaned-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: musaned-data
+
+---
+# ── Service ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: musaned-voucher
+spec:
+  selector:
+    app: musaned-voucher
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+
+---
+# ── Route ────────────────────────────────────────────────────────────────────
+# Exposes the service externally with TLS termination at the edge.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: musaned-voucher
+spec:
+  to:
+    kind: Service
+    name: musaned-voucher
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

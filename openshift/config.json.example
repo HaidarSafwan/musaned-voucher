@@ -1,0 +1,15 @@
+{
+  "staging_dsn":        "oracle://user:pass@host:port/service",
+  "staging_table":      "MUSANED_VOUCHERS",
+  "query":              "YOUR_QUERY_HERE",
+  "server_port":        "8081",
+  "upload_dir":         "/app/data/uploads",
+  "result_dir":         "/app/data/results",
+  "store_path":         "/app/data/jobs.json",
+  "insert_batch_size":  10000,
+  "api_key":            "your-api-key-here",
+  "query_timeout_secs": 120,
+  "job_ttl_secs":       3600,
+  "rate_limit_rps":     10,
+  "rate_limit_burst":   20
+}
